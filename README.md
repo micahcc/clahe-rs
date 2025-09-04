@@ -26,4 +26,4 @@ possible), if you are interested in making it faster let me know.
 
 - More performance testing
 - Rayon threading
-- Integrate into [imageproc crate](https://github.com/image-rs/imageproc]
+- Integrate into [imageproc crate](https://github.com/image-rs/imageproc)
