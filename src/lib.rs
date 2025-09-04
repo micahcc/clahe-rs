@@ -146,37 +146,42 @@ where
     let mut dst = ImageBuffer::<Luma<U>, Vec<U>>::new(input.width(), input.height());
     let mut _store = None;
 
-    let (tile_size_wh, src_for_lut) = if input.width() % tiles_x as u32 == 0
-        && input.height() % tiles_y as u32 == 0
-    {
-        (
+    let (tile_size_wh, src_for_lut) =
+        if input.width() % tiles_x as u32 == 0 && input.height() % tiles_y as u32 == 0 {
             (
-                input.width() as usize / tiles_x,
-                input.height() as usize / tiles_y,
-            ),
-            input,
-        )
-    } else {
-        let new_width = (input.width() as usize + tiles_x - 1) / tiles_x;
-        let new_height = (input.height() as usize + tiles_y - 1) / tiles_y;
-        let img = ImageBuffer::from_fn(new_width as u32, new_height as u32, |x, y| {
-            // mirror boundary
-            // width - abs(0 - width) => 0
-            // width - abs((width-1) - width) => width - 1
-            // width - abs((width+1) - width) => width - 1
-            let src_x = (input.width() as i32 + (x as i32 - input.width() as i32).abs()) as u32;
-            let src_y = (input.height() as i32 + (y as i32 - input.height() as i32).abs()) as u32;
-            *input.get_pixel(src_x, src_y)
-        });
+                (
+                    input.width() as usize / tiles_x,
+                    input.height() as usize / tiles_y,
+                ),
+                input,
+            )
+        } else {
+            let tile_width = (input.width() as usize + tiles_x - 1) / tiles_x;
+            let tile_height = (input.height() as usize + tiles_y - 1) / tiles_y;
+            let new_width = tile_width * tiles_x;
+            let new_height = tile_height * tiles_y;
+            let max_x = input.width() as i32 - 1;
+            let max_y = input.height() as i32 - 1;
+            println!("tiles_x: {tiles_x}, tiles_y: {tiles_y}, {new_width}, {new_height}");
+            let img = ImageBuffer::from_fn(new_width as u32, new_height as u32, |x, y| {
+                // mirror boundary
+                // max_x - abs(0 - max_x) => 0
+                // max_x - abs(width - 1 - max_x) => width - 1
+                // max_x - abs(width - max_x) => width - 2
+                // max_x - abs(width + 1 - max_x) => width - 3
 
-        _store = Some(img);
-        (
-            (new_width / tiles_x, new_height / tiles_y),
-            _store.as_ref().unwrap(),
-        )
-    };
+                let src_x = (max_x - (x as i32 - max_x).abs()) as u32;
+                let src_y = (max_y - (y as i32 - max_y).abs()) as u32;
+                println!("{x} -> {src_x}, {y} -> {src_y}");
+                *input.get_pixel(src_x, src_y)
+            });
+
+            _store = Some(img);
+            ((tile_width, tile_height), _store.as_ref().unwrap())
+        };
 
     let tile_size_total = tile_size_wh.0 * tile_size_wh.1;
+    println!("tile size: {tile_size_total:?}");
     let lut_scale = (T_MAX as f32 - 1.0) / tile_size_total as f32;
 
     let clip_limit = if clip_limit > 0.0 {
@@ -189,6 +194,7 @@ where
     let mut luts: Vec<[u8; T_MAX]> = vec![[0; T_MAX]; (tiles_x * tiles_y) as usize];
     for tile_x in 0..tiles_x {
         for tile_y in 0..tiles_y {
+            println!("calc_lut_body {tile_x}, {tile_y}");
             calc_lut_body::<T, T_MAX>(
                 &mut luts[tile_y * tiles_x + tile_x],
                 &src_for_lut,
@@ -198,6 +204,7 @@ where
                 tile_x,
                 tile_y,
             );
+            println!("{:?}", luts[tile_y * tiles_x + tile_x]);
         }
     }
 
