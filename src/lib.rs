@@ -238,3 +238,12 @@ pub fn clahe_u8_to_u8(
 ) -> Result<GrayImage, Box<dyn std::error::Error>> {
     clahe_generic::<u8, u8, 256, 256>(tiles_x, tiles_y, clip_limit, input)
 }
+
+pub fn clahe_u16_to_u8(
+    tiles_x: usize,
+    tiles_y: usize,
+    clip_limit: f32,
+    input: &ImageBuffer<Luma<u16>, Vec<u16>>,
+) -> Result<GrayImage, Box<dyn std::error::Error>> {
+    clahe_generic::<u16, u8, 65536, 256>(tiles_x, tiles_y, clip_limit, input)
+}
