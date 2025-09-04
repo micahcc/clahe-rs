@@ -19,9 +19,7 @@ possible), if you are interested in making it faster let me know.
 |       Before        |          After          |
 | :-----------------: | :---------------------: |
 | ![](honeycomb.png)  | ![](honeycomb_out.png)  |
-| :----------------:  | :--------------------:  |
 | ![](high_depth.png) | ![](high_depth_out.png) |
-| :----------------:  | :--------------------:  |
 |  ![](fractal.png)   |  ![](fractal_out.png)   |
 
 # Future work
