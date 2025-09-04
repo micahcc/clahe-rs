@@ -4,7 +4,7 @@ use image::ImageBuffer;
 use image::Luma;
 
 fn calc_lut_body<T, const HIST_SIZE: usize>(
-    lut: &mut [u8; HIST_SIZE],
+    lut: &mut [u32; HIST_SIZE],
     src: &ImageBuffer<Luma<T>, Vec<T>>,
     tile_size_wh: (usize, usize),
     clip_limit: i32,
@@ -64,14 +64,14 @@ fn calc_lut_body<T, const HIST_SIZE: usize>(
     let mut sum = 0;
     for i in 0..HIST_SIZE {
         sum += tile_hist[i];
-        lut[i] = (sum as f32 * lut_scale).clamp(0.0, HIST_SIZE as f32 - 1.0) as u8;
+        lut[i] = (sum as f32 * lut_scale).clamp(0.0, HIST_SIZE as f32 - 1.0) as u32;
     }
 }
 
 fn interpolate<T, U, const T_MAX: usize, const U_MAX: usize>(
     dst: &mut ImageBuffer<Luma<U>, Vec<U>>,
     input: &ImageBuffer<Luma<T>, Vec<T>>,
-    luts: &[[u8; T_MAX]],
+    luts: &[[u32; T_MAX]],
     tile_size_wh: (usize, usize),
     n_tiles_wh: (usize, usize),
     tile_xs: (i32, i32),
@@ -193,7 +193,7 @@ where
     };
 
     // TODO is there a parallel for solution in rust?
-    let mut luts: Vec<[u8; T_MAX]> = vec![[0; T_MAX]; (tiles_x * tiles_y) as usize];
+    let mut luts: Vec<[u32; T_MAX]> = vec![[0; T_MAX]; (tiles_x * tiles_y) as usize];
     for tile_x in 0..tiles_x {
         for tile_y in 0..tiles_y {
             println!("calc_lut_body {tile_x}, {tile_y}");
