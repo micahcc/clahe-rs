@@ -1,288 +1,206 @@
-use std::cmp::min;
 use image::*;
-use imageproc::pixelops::interpolate;
 use imageproc::stats::{histogram, ChannelHistogram};
+use std::cmp::min;
 
-pub fn clahe(input: GrayImage) -> Result<GrayImage, Box<dyn std::error::Error>> {
-    let mut output = GrayImage::new(input.dimensions().0, input.dimensions().1);
+fn calc_lut_body<T, const HIST_SIZE: usize>(
+    lut: &mut [u8; HIST_SIZE],
+    src: &GrayImage,
+    tile_size_wh: (usize, usize),
+    clip_limit: i32,
+    lut_scale: f32,
+    tile_x: usize,
+    tile_y: usize,
+) {
+    let tile = src.view(
+        (tile_x * tile_size_wh.0) as u32,
+        (tile_y * tile_size_wh.1) as u32,
+        tile_size_wh.0 as u32,
+        tile_size_wh.1 as u32,
+    );
 
-    let tiles_hz = 8;
-    let tiles_vt = 8;
-    let tile_width = input.dimensions().0 / tiles_hz;
-    let tile_height = input.dimensions().1 / tiles_vt;
-    let mut lookup_tables = vec![vec![vec![0 as u8; 256]; tiles_hz as usize]; tiles_vt as usize];
+    let mut tile_hist: [u32; HIST_SIZE] = [0; HIST_SIZE];
+    for p in tile.pixels() {
+        tile_hist[p.0 as usize] += 1;
+    }
 
-    for (row_idx, row) in lookup_tables.iter_mut().enumerate() {
-        for (col_idx, table) in row.iter_mut().enumerate() {
-            let region_width = if col_idx == (tiles_hz - 1) as usize {
-                tile_width + input.dimensions().0 % tiles_hz
-            } else {
-                tile_width
-            };
-            let region_height = if row_idx == (tiles_vt - 1) as usize {
-                tile_height + input.dimensions().1 % tiles_vt
-            } else {
-                tile_height
-            };
+    // clip histogram
+    if clip_limit > 0 {
+        let clip_limit = clip_limit as u32;
 
-            let tile = SubImage::new(
-                &input,
-                tile_width * col_idx as u32,
-                tile_height * row_idx as u32,
-                region_width,
-                region_height,
-            );
+        // how many pixels were clipped
+        let mut clipped: usize = 0;
+        for i in 0..HIST_SIZE {
+            if tile_hist[i] > clip_limit {
+                clipped += (tile_hist[i] - clip_limit) as usize;
+                tile_hist[i] = clip_limit;
+            }
+        }
 
-            let tile_hist = clip_histogram(histogram(&tile.to_image()), 40);
-            perform_gray_level_mapping(&tile_hist, table);
+        // redistribute clipped pixels
+        let redist_batch = clipped / HIST_SIZE;
+        let mut residual = clipped - redist_batch * HIST_SIZE;
+        for i in 0..HIST_SIZE {
+            // give every hist the full batch
+            tile_hist[i] += redist_batch as u32;
+        }
+
+        // destribute the residuals around the image
+        if residual != 0 {
+            let residual_step = (HIST_SIZE / residual).max(1);
+            let mut i = 0;
+            while i < HIST_SIZE && residual > 0 {
+                tile_hist[i as usize] += 1;
+
+                i += residual_step;
+                residual -= 1;
+            }
         }
     }
 
-    for (x, y, val) in input.enumerate_pixels() {
-        // use x and y to find four closest tile centers and their coordinates
+    // calc Lut
+    let mut sum = 0;
+    for i in 0..HIST_SIZE {
+        sum += tile_hist[i];
+        lut[i] = (sum as f32 * lut_scale).clamp(0.0, HIST_SIZE as f32 - 1.0) as u8;
+    }
+}
 
-        if let Ok(tile) = is_corner_region(
-            x,
-            y,
-            tiles_hz,
-            tiles_vt,
-            input.dimensions().0,
-            input.dimensions().1,
-        ) {
-            let output_val = lookup_tables[tile.y as usize][tile.x as usize][val.0[0] as usize];
-            output.get_pixel_mut(x, y).0 = [output_val];
-        } else if let Ok(tiles) = is_border_region(
-            x,
-            y,
-            tiles_hz,
-            tiles_vt,
-            input.dimensions().0,
-            input.dimensions().1,
-        ) {
-            let tile_pixel0 =
-                lookup_tables[tiles.0.y as usize][tiles.0.x as usize][val.0[0] as usize];
-            let tile_pixel1 =
-                lookup_tables[tiles.1.y as usize][tiles.1.x as usize][val.0[0] as usize];
-            let weight = if tiles.0.x == tiles.1.x {
-                let tile_center0 = get_pixel_coordinate_from_tile_coordinate(tiles.0.x, tile_width);
-                (x as f32 - tile_center0 as f32) / tile_width as f32
-            } else if tiles.0.y == tiles.0.y {
-                let tile_center0 =
-                    get_pixel_coordinate_from_tile_coordinate(tiles.0.y, tile_height);
-                (y as f32 - tile_center0 as f32) / tile_height as f32
-            } else {
-                0.0
-            };
+fn interpolate<T, const HIST_SIZE: usize>(
+    dst: &mut GrayImage,
+    input: &GrayImage,
+    luts: &[[u8; HIST_SIZE]],
+    tile_size_wh: (usize, usize),
+    n_tiles_wh: (usize, usize),
+    tile_xs: (i32, i32),
+    tile_ys: (i32, i32),
+) {
+    let input_width = input.width() as usize;
+    let input_height = input.height() as usize;
 
-            output.get_pixel_mut(x, y).0 = if weight > 0.0 {
-                interpolate(Luma::from([tile_pixel0]), Luma::from([tile_pixel1]), 1. - weight).0
-            } else {
-                interpolate(
-                    Luma::from([tile_pixel1]),
-                    Luma::from([tile_pixel0]),
-                    -weight,
-                )
-                .0
-            };
-        } else {
-            let tiles = get_neighbor_tiles(
-                x,
-                y,
-                tiles_hz,
-                tiles_vt,
-                input.dimensions().0,
-                input.dimensions().1,
-            )
-            .unwrap();
+    // Calculate range,
+    //  for -1, 0 this should be 0..(tile_width/2)
+    //  for 0, 1 this should be (tile_width/2 to 3 tile_width / 2)
 
-            let pixel_values = tiles.iter().map(|tile| lookup_tables[tile.y as usize][tile.x as usize][val.0[0] as usize]).collect::<Vec<u8>>();
-            let x_weight = (x - (tiles[0].x * tile_width + (tile_width / 2))) as f32 / tile_width as f32;
-            let y_weight = (y - (tiles[0].y * tile_height + (tile_height / 2))) as f32 / tile_height as f32;
-            let intermediate_1 = interpolate(Luma::from([pixel_values[0]]), Luma::from([pixel_values[1]]), 1.0 - x_weight);
-            let intermediate_2 = interpolate(Luma::from([pixel_values[3]]), Luma::from([pixel_values[2]]), 1.0 - x_weight);
-            output.get_pixel_mut(x, y).0 = interpolate::<Luma<u8>>(intermediate_1, intermediate_2, 1.0 - y_weight).0;
+    let (tile_width, tile_height) = tile_size_wh;
+    let x_start: u32 = (tile_xs.0 * tile_width as i32 + tile_width as i32 / 2)
+        .clamp(0i32, input_width as i32) as u32;
+    let x_end: u32 = (tile_xs.1 * tile_width as i32 + tile_width as i32 / 2)
+        .clamp(0i32, input_height as i32) as u32;
+
+    let y_start: u32 = (tile_ys.0 * tile_height as i32 + tile_height as i32 / 2)
+        .clamp(0i32, input_height as i32) as u32;
+    let y_end: u32 = (tile_ys.1 * tile_height as i32 + tile_height as i32 / 2)
+        .clamp(0i32, input_height as i32) as u32;
+
+    let lut_left = tile_xs.0.clamp(0, n_tiles_wh.0 as i32 - 1) as usize;
+    let lut_right = tile_xs.1.clamp(0, n_tiles_wh.0 as i32 - 1) as usize;
+    let lut_top = tile_ys.0.clamp(0, n_tiles_wh.1 as i32 - 1) as usize;
+    let lut_bottom = tile_ys.1.clamp(0, n_tiles_wh.1 as i32 - 1) as usize;
+
+    let hist_00 = &luts[lut_left + n_tiles_wh.0 * lut_top];
+    let hist_10 = &luts[lut_right + n_tiles_wh.0 * lut_top];
+    let hist_01 = &luts[lut_left + n_tiles_wh.0 * lut_bottom];
+    let hist_11 = &luts[lut_right + n_tiles_wh.0 * lut_bottom];
+
+    for (xi, x) in (x_start..x_end).enumerate() {
+        for (yi, y) in (y_start..y_end).enumerate() {
+            let xw = xi as f32 / tile_width as f32;
+            let yw = yi as f32 / tile_height as f32;
+            let w_00 = (1.0 - xw) * (1.0 - yw);
+            let w_10 = xw * (1.0 - yw);
+            let w_01 = (1.0 - xw) * yw;
+            let w_11 = xw * yw;
+
+            let p = input.get_pixel(x, y).0[0] as usize;
+
+            let q = (hist_00[p] as f32 * w_00
+                + hist_01[p] as f32 * w_01
+                + hist_10[p] as f32 * w_10
+                + hist_11[p] as f32 * w_11)
+                .clamp(0.0, 255.0) as u8;
+
+            dst.put_pixel(x, y, Luma([q]));
         }
     }
-
-    Ok(output)
 }
 
-fn clip_histogram(mut histogram: ChannelHistogram, limit: u32) -> ChannelHistogram {
-    let mut num_pixels_over_limit: u32 = 0;
+pub fn clahe_u8(
+    tiles_x: usize,
+    tiles_y: usize,
+    clip_limit: f32,
+    input: GrayImage,
+) -> Result<GrayImage, Box<dyn std::error::Error>> {
+    const HIST_SIZE: usize = 256;
 
-    if histogram.channels.len() != 1 {
-        panic!("Too many channels!")
-    }
+    let mut dst = ImageBuffer::new(input.width(), input.height());
 
-    for (_bin, count) in histogram.channels[0].iter_mut().enumerate() {
-        if *count > limit {
-            num_pixels_over_limit += *count - limit;
-            *count = limit;
-        }
-    }
-
-    let excess_pixels_per_bin = num_pixels_over_limit / 256;
-
-    for count in histogram.channels[0].iter_mut() {
-        *count += excess_pixels_per_bin;
-    }
-
-    histogram
-}
-
-fn perform_gray_level_mapping(histogram: &ChannelHistogram, lookup_table: &mut Vec<u8>) {
-    let num_pixels: u32 = histogram.channels[0].iter().sum();
-
-    let mut num_pixels_seen: u32 = 0;
-    for (index, entry) in lookup_table.iter_mut().enumerate() {
-        num_pixels_seen += histogram.channels[0][index];
-
-        let percent_pixels_seen = num_pixels_seen as f64 / num_pixels as f64;
-        *entry = (percent_pixels_seen * 255.0) as u8;
-    }
-}
-
-#[derive(Copy, Clone, Debug)]
-struct TileCoordinate {
-    pub x: u32,
-    pub y: u32,
-}
-
-fn is_corner_region(
-    x: u32,
-    y: u32,
-    tiles_hz: u32,
-    tiles_vt: u32,
-    dim_x: u32,
-    dim_y: u32,
-) -> Result<TileCoordinate, ()> {
-    let tile_width = dim_x / tiles_hz;
-    let tile_height = dim_y / tiles_vt;
-
-    if (x <= tile_width / 2) && (y <= tile_height / 2) {
-        // Top-left corner
-        Ok(TileCoordinate { x: 0, y: 0 })
-    } else if x > ((tile_width * tiles_hz) - tile_width / 2) && y <= tile_height / 2 {
-        // Top-right corner
-        Ok(TileCoordinate {
-            x: tiles_hz - 1,
-            y: 0,
-        })
-    } else if x > ((tile_width * tiles_hz) - tile_width / 2)
-        && y > ((tile_height * tiles_vt) - tile_height / 2)
+    let (tile_size_wh, src_for_lut) = if input.width() % tiles_x as u32 == 0
+        && input.height() % tiles_y as u32 == 0
     {
-        // Bottom-right corner
-        Ok(TileCoordinate {
-            x: tiles_hz - 1,
-            y: tiles_vt - 1,
-        })
-    } else if (x <= tile_width / 2) && y > ((tile_height * tiles_vt) - tile_height / 2) {
-        // Bottom-left corner
-        Ok(TileCoordinate {
-            x: 0,
-            y: tiles_vt - 1,
-        })
+        (
+            (
+                input.width() as usize / tiles_x,
+                input.height() as usize / tiles_y,
+            ),
+            input,
+        )
     } else {
-        Err(())
-    }
-}
+        let new_width = (input.width() as usize + tiles_x - 1) / tiles_x;
+        let new_height = (input.height() as usize + tiles_y - 1) / tiles_y;
+        let img = ImageBuffer::from_fn(new_width as u32, new_height as u32, |x, y| {
+            // mirror boundary
+            // width - abs(0 - width) => 0
+            // width - abs((width-1) - width) => width - 1
+            // width - abs((width+1) - width) => width - 1
+            let src_x = (input.width() as i32 + (x as i32 - input.width() as i32).abs()) as u32;
+            let src_y = (input.height() as i32 + (y as i32 - input.height() as i32).abs()) as u32;
+            *input.get_pixel(src_x, src_y)
+        });
 
-fn is_border_region(
-    x: u32,
-    y: u32,
-    tiles_hz: u32,
-    tiles_vt: u32,
-    dim_x: u32,
-    dim_y: u32,
-) -> Result<(TileCoordinate, TileCoordinate), ()> {
-    let tile_width = dim_x / tiles_hz;
-    let tile_height = dim_y / tiles_vt;
+        ((new_width / tiles_x, new_height / tiles_y), img)
+    };
 
-    if y <= (tile_height / 2) {
-        // Top border
-        let left_x = min((x - (tile_width / 2)) / tile_width, tiles_hz - 2);
-        let right_x = left_x + 1;
-        Ok((
-            TileCoordinate { x: left_x, y: 0 },
-            TileCoordinate { x: right_x, y: 0 },
-        ))
-    } else if y > ((tiles_vt * tile_height) - (tile_height / 2)) {
-        // Bottom border
-        let left_x = min((x - (tile_width / 2)) / tile_width, tiles_hz - 2);
-        let right_x = left_x + 1;
-        Ok((
-            TileCoordinate {
-                x: left_x,
-                y: tiles_vt - 1,
-            },
-            TileCoordinate {
-                x: right_x,
-                y: tiles_vt - 1,
-            },
-        ))
-    } else if x <= (tile_width / 2) {
-        // Left border
-        let top_y = min((y - (tile_height / 2)) / tile_height, tiles_vt - 2);
-        let bottom_y = top_y + 1;
-        Ok((
-            TileCoordinate { x: 0, y: top_y },
-            TileCoordinate { x: 0, y: bottom_y },
-        ))
-    } else if x > ((tiles_hz * tile_width) - (tile_width / 2)) {
-        // Right border
-        let top_y = min((y - (tile_height / 2)) / tile_height, tiles_vt - 2);
-        let bottom_y = top_y + 1;
-        Ok((
-            TileCoordinate {
-                x: tiles_hz - 1,
-                y: top_y,
-            },
-            TileCoordinate {
-                x: tiles_hz - 1,
-                y: bottom_y,
-            },
-        ))
+    let tile_size_total = tile_size_wh.0 * tile_size_wh.1;
+    let lut_scale = (HIST_SIZE as f32 - 1.0) / tile_size_total as f32;
+
+    let clip_limit = if clip_limit > 0.0 {
+        (clip_limit * tile_size_total as f32 / HIST_SIZE as f32).max(1.0) as i32
     } else {
-        Err(())
+        0
+    };
+
+    // TODO is there a parallel for solution in rust?
+    let mut luts: Vec<[u8; 256]> = vec![[0; 256]; (tiles_x * tiles_y) as usize];
+    for tile_x in 0..tiles_x {
+        for tile_y in 0..tiles_y {
+            calc_lut_body::<u8, 256>(
+                &mut luts[tile_y * tiles_x + tile_x],
+                &src_for_lut,
+                tile_size_wh,
+                clip_limit,
+                lut_scale,
+                tile_x,
+                tile_y,
+            );
+        }
     }
-}
 
-fn get_neighbor_tiles(
-    x: u32,
-    y: u32,
-    tiles_hz: u32,
-    tiles_vt: u32,
-    dim_x: u32,
-    dim_y: u32,
-) -> Result<[TileCoordinate; 4], ()> {
-    let tile_width = dim_x / tiles_hz;
-    let tile_height = dim_y / tiles_vt;
+    // Produce pairs of (None, 0), (0, 1) ... (n-1, None)
+    // in both x and y, each interpolate will take a mixture of the two
+    // or in the case of boundaries of just its one
+    for tile_x in 0..=tiles_x {
+        for tile_y in 0..=tiles_y {
+            interpolate::<u8, 256>(
+                &mut dst,
+                &src_for_lut,
+                &luts,
+                tile_size_wh,
+                (tiles_x, tiles_y),
+                (tile_x as i32 - 1, tile_x as i32),
+                (tile_y as i32 - 1, tile_y as i32),
+            );
+        }
+    }
 
-    let left_x = min((x - (tile_width / 2)) / tile_width, tiles_hz - 2);
-    let right_x = left_x + 1;
-    let top_y = min((y - (tile_height / 2)) / tile_height, tiles_vt - 2);
-    let bottom_y = top_y + 1;
-
-    Ok([
-        TileCoordinate {
-            x: left_x,
-            y: top_y,
-        },
-        TileCoordinate {
-            x: right_x,
-            y: top_y,
-        },
-        TileCoordinate {
-            x: right_x,
-            y: bottom_y,
-        },
-        TileCoordinate {
-            x: left_x,
-            y: bottom_y,
-        },
-    ])
-}
-
-fn get_pixel_coordinate_from_tile_coordinate(tile_coord: u32, pixels_per_tile: u32) -> u32 {
-    (pixels_per_tile / 2) + (tile_coord * pixels_per_tile)
+    Ok(dst)
 }
