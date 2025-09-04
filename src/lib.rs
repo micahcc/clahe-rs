@@ -22,8 +22,8 @@ fn calc_lut_body<T, const HIST_SIZE: usize>(
     );
 
     let mut tile_hist: [u32; HIST_SIZE] = [0; HIST_SIZE];
-    for p in tile.pixels() {
-        tile_hist[p.0 as usize] += 1;
+    for (_x, _y, v) in tile.pixels() {
+        tile_hist[v[0].to_usize().expect("failed to convert T to usize")] += 1;
     }
 
     // clip histogram
@@ -78,7 +78,10 @@ fn interpolate<T, U, const T_MAX: usize, const U_MAX: usize>(
     tile_ys: (i32, i32),
 ) where
     T: image::Primitive,
-    U: image::Primitive + num_traits::cast::ToPrimitive + num_traits::cast::FromPrimitive,
+    U: image::Primitive
+        + num_traits::cast::ToPrimitive
+        + num_traits::cast::FromPrimitive
+        + std::fmt::Display,
 {
     let out_width = dst.width() as usize;
     let out_height = dst.height() as usize;
@@ -97,8 +100,6 @@ fn interpolate<T, U, const T_MAX: usize, const U_MAX: usize>(
         .clamp(0i32, out_height as i32) as u32;
     let y_end: u32 = (tile_ys.1 * tile_height as i32 + tile_height as i32 / 2)
         .clamp(0i32, out_height as i32) as u32;
-
-    println!("fill: [{x_start}, {x_end}), [{y_start}, {y_end})");
 
     let lut_left = tile_xs.0.clamp(0, n_tiles_wh.0 as i32 - 1) as usize;
     let lut_right = tile_xs.1.clamp(0, n_tiles_wh.0 as i32 - 1) as usize;
@@ -130,6 +131,7 @@ fn interpolate<T, U, const T_MAX: usize, const U_MAX: usize>(
                 .clamp(0.0, U::max_value().to_f32().unwrap_or(0.0));
             let q: U = U::from_f32(q).unwrap_or(U::zero());
 
+            debug_assert!((w_00 + w_10 + w_01 + w_11 - 1.0).abs() < 0.0001);
             dst.put_pixel(x, y, Luma([q]));
         }
     }
@@ -143,7 +145,10 @@ pub fn clahe_generic<T, U, const T_MAX: usize, const U_MAX: usize>(
 ) -> Result<ImageBuffer<Luma<U>, Vec<U>>, Box<dyn std::error::Error>>
 where
     T: image::Primitive,
-    U: image::Primitive + num_traits::cast::ToPrimitive + num_traits::cast::FromPrimitive,
+    U: image::Primitive
+        + num_traits::cast::ToPrimitive
+        + num_traits::cast::FromPrimitive
+        + std::fmt::Display,
 {
     let mut dst = ImageBuffer::<Luma<U>, Vec<U>>::new(input.width(), input.height());
     let mut _store = None;
@@ -164,7 +169,6 @@ where
             let new_height = tile_height * tiles_y;
             let max_x = input.width() as i32 - 1;
             let max_y = input.height() as i32 - 1;
-            println!("tiles_x: {tiles_x}, tiles_y: {tiles_y}, {new_width}, {new_height}");
             let img = ImageBuffer::from_fn(new_width as u32, new_height as u32, |x, y| {
                 // mirror boundary
                 // max_x - abs(0 - max_x) => 0
@@ -174,7 +178,6 @@ where
 
                 let src_x = (max_x - (x as i32 - max_x).abs()) as u32;
                 let src_y = (max_y - (y as i32 - max_y).abs()) as u32;
-                println!("{x} -> {src_x}, {y} -> {src_y}");
                 *input.get_pixel(src_x, src_y)
             });
 
@@ -183,7 +186,6 @@ where
         };
 
     let tile_size_total = tile_size_wh.0 * tile_size_wh.1;
-    println!("tile size: {tile_size_total:?}");
     let lut_scale = (T_MAX as f32 - 1.0) / tile_size_total as f32;
 
     let clip_limit = if clip_limit > 0.0 {
@@ -196,7 +198,6 @@ where
     let mut luts: Vec<[u32; T_MAX]> = vec![[0; T_MAX]; (tiles_x * tiles_y) as usize];
     for tile_x in 0..tiles_x {
         for tile_y in 0..tiles_y {
-            println!("calc_lut_body {tile_x}, {tile_y}");
             calc_lut_body::<T, T_MAX>(
                 &mut luts[tile_y * tiles_x + tile_x],
                 &src_for_lut,
@@ -206,7 +207,6 @@ where
                 tile_x,
                 tile_y,
             );
-            println!("{:?}", luts[tile_y * tiles_x + tile_x]);
         }
     }
 

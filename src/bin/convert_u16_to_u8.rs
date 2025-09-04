@@ -9,7 +9,7 @@ fn main() {
 
     let im = image::open(&Path::new(&file)).unwrap();
     let im = im.into_luma16();
-    let output = clahe_rs::clahe_u16_to_u8(8, 8, 2.0, &im).unwrap();
+    let output = clahe_rs::clahe_u16_to_u8(8, 8, 0.0, &im).unwrap();
 
     output
         .save_with_format(&Path::new("output.png"), image::ImageFormat::Png)
