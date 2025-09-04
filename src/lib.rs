@@ -1,16 +1,19 @@
-use image::*;
-use imageproc::stats::{histogram, ChannelHistogram};
-use std::cmp::min;
+use image::GenericImageView;
+use image::GrayImage;
+use image::ImageBuffer;
+use image::Luma;
 
 fn calc_lut_body<T, const HIST_SIZE: usize>(
     lut: &mut [u8; HIST_SIZE],
-    src: &GrayImage,
+    src: &ImageBuffer<Luma<T>, Vec<T>>,
     tile_size_wh: (usize, usize),
     clip_limit: i32,
     lut_scale: f32,
     tile_x: usize,
     tile_y: usize,
-) {
+) where
+    T: image::Primitive,
+{
     let tile = src.view(
         (tile_x * tile_size_wh.0) as u32,
         (tile_y * tile_size_wh.1) as u32,
@@ -65,15 +68,18 @@ fn calc_lut_body<T, const HIST_SIZE: usize>(
     }
 }
 
-fn interpolate<T, const HIST_SIZE: usize>(
-    dst: &mut GrayImage,
-    input: &GrayImage,
-    luts: &[[u8; HIST_SIZE]],
+fn interpolate<T, U, const T_MAX: usize, const U_MAX: usize>(
+    dst: &mut ImageBuffer<Luma<U>, Vec<U>>,
+    input: &ImageBuffer<Luma<T>, Vec<T>>,
+    luts: &[[u8; T_MAX]],
     tile_size_wh: (usize, usize),
     n_tiles_wh: (usize, usize),
     tile_xs: (i32, i32),
     tile_ys: (i32, i32),
-) {
+) where
+    T: image::Primitive,
+    U: image::Primitive + num_traits::cast::ToPrimitive + num_traits::cast::FromPrimitive,
+{
     let input_width = input.width() as usize;
     let input_height = input.height() as usize;
 
@@ -101,6 +107,7 @@ fn interpolate<T, const HIST_SIZE: usize>(
     let hist_10 = &luts[lut_right + n_tiles_wh.0 * lut_top];
     let hist_01 = &luts[lut_left + n_tiles_wh.0 * lut_bottom];
     let hist_11 = &luts[lut_right + n_tiles_wh.0 * lut_bottom];
+    let scale = T_MAX as f32 / U_MAX as f32;
 
     for (xi, x) in (x_start..x_end).enumerate() {
         for (yi, y) in (y_start..y_end).enumerate() {
@@ -111,28 +118,33 @@ fn interpolate<T, const HIST_SIZE: usize>(
             let w_01 = (1.0 - xw) * yw;
             let w_11 = xw * yw;
 
-            let p = input.get_pixel(x, y).0[0] as usize;
+            let p: usize = input.get_pixel(x, y).0[0].to_usize().unwrap_or(0);
 
-            let q = (hist_00[p] as f32 * w_00
-                + hist_01[p] as f32 * w_01
-                + hist_10[p] as f32 * w_10
-                + hist_11[p] as f32 * w_11)
-                .clamp(0.0, 255.0) as u8;
+            let q = (scale
+                * (hist_00[p] as f32 * w_00
+                    + hist_01[p] as f32 * w_01
+                    + hist_10[p] as f32 * w_10
+                    + hist_11[p] as f32 * w_11))
+                .clamp(0.0, U::max_value().to_f32().unwrap_or(0.0));
+            let q: U = U::from_f32(q).unwrap_or(U::zero());
 
             dst.put_pixel(x, y, Luma([q]));
         }
     }
 }
 
-pub fn clahe_u8(
+pub fn clahe_generic<T, U, const T_MAX: usize, const U_MAX: usize>(
     tiles_x: usize,
     tiles_y: usize,
     clip_limit: f32,
-    input: GrayImage,
-) -> Result<GrayImage, Box<dyn std::error::Error>> {
-    const HIST_SIZE: usize = 256;
-
-    let mut dst = ImageBuffer::new(input.width(), input.height());
+    input: &ImageBuffer<Luma<T>, Vec<T>>,
+) -> Result<ImageBuffer<Luma<U>, Vec<U>>, Box<dyn std::error::Error>>
+where
+    T: image::Primitive,
+    U: image::Primitive + num_traits::cast::ToPrimitive + num_traits::cast::FromPrimitive,
+{
+    let mut dst = ImageBuffer::<Luma<U>, Vec<U>>::new(input.width(), input.height());
+    let mut _store = None;
 
     let (tile_size_wh, src_for_lut) = if input.width() % tiles_x as u32 == 0
         && input.height() % tiles_y as u32 == 0
@@ -157,23 +169,27 @@ pub fn clahe_u8(
             *input.get_pixel(src_x, src_y)
         });
 
-        ((new_width / tiles_x, new_height / tiles_y), img)
+        _store = Some(img);
+        (
+            (new_width / tiles_x, new_height / tiles_y),
+            _store.as_ref().unwrap(),
+        )
     };
 
     let tile_size_total = tile_size_wh.0 * tile_size_wh.1;
-    let lut_scale = (HIST_SIZE as f32 - 1.0) / tile_size_total as f32;
+    let lut_scale = (T_MAX as f32 - 1.0) / tile_size_total as f32;
 
     let clip_limit = if clip_limit > 0.0 {
-        (clip_limit * tile_size_total as f32 / HIST_SIZE as f32).max(1.0) as i32
+        (clip_limit * tile_size_total as f32 / T_MAX as f32).max(1.0) as i32
     } else {
         0
     };
 
     // TODO is there a parallel for solution in rust?
-    let mut luts: Vec<[u8; 256]> = vec![[0; 256]; (tiles_x * tiles_y) as usize];
+    let mut luts: Vec<[u8; T_MAX]> = vec![[0; T_MAX]; (tiles_x * tiles_y) as usize];
     for tile_x in 0..tiles_x {
         for tile_y in 0..tiles_y {
-            calc_lut_body::<u8, 256>(
+            calc_lut_body::<T, T_MAX>(
                 &mut luts[tile_y * tiles_x + tile_x],
                 &src_for_lut,
                 tile_size_wh,
@@ -190,7 +206,7 @@ pub fn clahe_u8(
     // or in the case of boundaries of just its one
     for tile_x in 0..=tiles_x {
         for tile_y in 0..=tiles_y {
-            interpolate::<u8, 256>(
+            interpolate::<T, U, T_MAX, U_MAX>(
                 &mut dst,
                 &src_for_lut,
                 &luts,
@@ -203,4 +219,13 @@ pub fn clahe_u8(
     }
 
     Ok(dst)
+}
+
+pub fn clahe_u8_to_u8(
+    tiles_x: usize,
+    tiles_y: usize,
+    clip_limit: f32,
+    input: &GrayImage,
+) -> Result<GrayImage, Box<dyn std::error::Error>> {
+    clahe_generic::<u8, u8, 256, 256>(tiles_x, tiles_y, clip_limit, input)
 }
