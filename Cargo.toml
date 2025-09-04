@@ -1,6 +1,6 @@
 [package]
 name = "clahe"
-version = "0.1.0"
+version = "0.1.1"
 description = "Pure rust image implementation of clahe"
 authors = ["Micah Chambers <micahc.vt@gmail.com>" ]
 edition = "2021"
