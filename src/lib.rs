@@ -109,7 +109,7 @@ fn interpolate<T, U, const T_MAX: usize, const U_MAX: usize>(
     let hist_10 = &luts[lut_right + n_tiles_wh.0 * lut_top];
     let hist_01 = &luts[lut_left + n_tiles_wh.0 * lut_bottom];
     let hist_11 = &luts[lut_right + n_tiles_wh.0 * lut_bottom];
-    let scale = T_MAX as f32 / U_MAX as f32;
+    let scale = U_MAX as f32 / T_MAX as f32;
 
     for (xi, x) in (x_start..x_end).enumerate() {
         for (yi, y) in (y_start..y_end).enumerate() {
