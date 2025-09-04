@@ -80,8 +80,8 @@ fn interpolate<T, U, const T_MAX: usize, const U_MAX: usize>(
     T: image::Primitive,
     U: image::Primitive + num_traits::cast::ToPrimitive + num_traits::cast::FromPrimitive,
 {
-    let input_width = input.width() as usize;
-    let input_height = input.height() as usize;
+    let out_width = dst.width() as usize;
+    let out_height = dst.height() as usize;
 
     // Calculate range,
     //  for -1, 0 this should be 0..(tile_width/2)
@@ -89,14 +89,16 @@ fn interpolate<T, U, const T_MAX: usize, const U_MAX: usize>(
 
     let (tile_width, tile_height) = tile_size_wh;
     let x_start: u32 = (tile_xs.0 * tile_width as i32 + tile_width as i32 / 2)
-        .clamp(0i32, input_width as i32) as u32;
+        .clamp(0i32, out_width as i32) as u32;
     let x_end: u32 = (tile_xs.1 * tile_width as i32 + tile_width as i32 / 2)
-        .clamp(0i32, input_height as i32) as u32;
+        .clamp(0i32, out_width as i32) as u32;
 
     let y_start: u32 = (tile_ys.0 * tile_height as i32 + tile_height as i32 / 2)
-        .clamp(0i32, input_height as i32) as u32;
+        .clamp(0i32, out_height as i32) as u32;
     let y_end: u32 = (tile_ys.1 * tile_height as i32 + tile_height as i32 / 2)
-        .clamp(0i32, input_height as i32) as u32;
+        .clamp(0i32, out_height as i32) as u32;
+
+    println!("fill: [{x_start}, {x_end}), [{y_start}, {y_end})");
 
     let lut_left = tile_xs.0.clamp(0, n_tiles_wh.0 as i32 - 1) as usize;
     let lut_right = tile_xs.1.clamp(0, n_tiles_wh.0 as i32 - 1) as usize;
