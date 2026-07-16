@@ -7,13 +7,13 @@ fn main() {
     } else {
         panic!(
             "Usage: {} <input> <output>",
-            std::env::args().nth(0).unwrap()
+            std::env::args().next().unwrap()
         );
     };
 
     let im = image::open(&in_file).unwrap();
     let im = im.into_luma16();
-    let output = clahe::clahe_u16_to_u8(8, 8, 0.0, &im).unwrap();
+    let output = clahe::clahe_u16_to_u8(8, 8, 0.0, &im);
 
     output
         .save_with_format(&out_file, image::ImageFormat::Png)
