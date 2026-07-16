@@ -30,30 +30,25 @@ fn calc_lut_body<T, const HIST_SIZE: usize>(
     if clip_limit > 0 {
         let clip_limit = clip_limit as u32;
 
-        // how many pixels were clipped
         let mut clipped: usize = 0;
-        for i in 0..HIST_SIZE {
-            if tile_hist[i] > clip_limit {
-                clipped += (tile_hist[i] - clip_limit) as usize;
-                tile_hist[i] = clip_limit;
+        for bin in tile_hist.iter_mut() {
+            if *bin > clip_limit {
+                clipped += (*bin - clip_limit) as usize;
+                *bin = clip_limit;
             }
         }
 
-        // redistribute clipped pixels
         let redist_batch = clipped / HIST_SIZE;
         let mut residual = clipped - redist_batch * HIST_SIZE;
-        for i in 0..HIST_SIZE {
-            // give every hist the full batch
-            tile_hist[i] += redist_batch as u32;
+        for bin in tile_hist.iter_mut() {
+            *bin += redist_batch as u32;
         }
 
-        // destribute the residuals around the image
         if residual != 0 {
-            let residual_step = (HIST_SIZE / residual).max(1);
+            let residual_step = HIST_SIZE.checked_div(residual).unwrap_or(1).max(1);
             let mut i = 0;
             while i < HIST_SIZE && residual > 0 {
-                tile_hist[i as usize] += 1;
-
+                tile_hist[i] += 1;
                 i += residual_step;
                 residual -= 1;
             }
@@ -155,37 +150,38 @@ where
     let mut dst = ImageBuffer::<Luma<U>, Vec<U>>::new(input.width(), input.height());
     let mut _store = None;
 
-    let (tile_size_wh, src_for_lut) =
-        if input.width() % tiles_x as u32 == 0 && input.height() % tiles_y as u32 == 0 {
+    let (tile_size_wh, src_for_lut) = if input.width().is_multiple_of(tiles_x as u32)
+        && input.height().is_multiple_of(tiles_y as u32)
+    {
+        (
             (
-                (
-                    input.width() as usize / tiles_x,
-                    input.height() as usize / tiles_y,
-                ),
-                input,
-            )
-        } else {
-            let tile_width = (input.width() as usize + tiles_x - 1) / tiles_x;
-            let tile_height = (input.height() as usize + tiles_y - 1) / tiles_y;
-            let new_width = tile_width * tiles_x;
-            let new_height = tile_height * tiles_y;
-            let max_x = input.width() as i32 - 1;
-            let max_y = input.height() as i32 - 1;
-            let img = ImageBuffer::from_fn(new_width as u32, new_height as u32, |x, y| {
-                // mirror boundary
-                // max_x - abs(0 - max_x) => 0
-                // max_x - abs(width - 1 - max_x) => width - 1
-                // max_x - abs(width - max_x) => width - 2
-                // max_x - abs(width + 1 - max_x) => width - 3
+                input.width() as usize / tiles_x,
+                input.height() as usize / tiles_y,
+            ),
+            input,
+        )
+    } else {
+        let tile_width = (input.width() as usize).div_ceil(tiles_x);
+        let tile_height = (input.height() as usize).div_ceil(tiles_y);
+        let new_width = tile_width * tiles_x;
+        let new_height = tile_height * tiles_y;
+        let max_x = input.width() as i32 - 1;
+        let max_y = input.height() as i32 - 1;
+        let img = ImageBuffer::from_fn(new_width as u32, new_height as u32, |x, y| {
+            // mirror boundary
+            // max_x - abs(0 - max_x) => 0
+            // max_x - abs(width - 1 - max_x) => width - 1
+            // max_x - abs(width - max_x) => width - 2
+            // max_x - abs(width + 1 - max_x) => width - 3
 
-                let src_x = (max_x - (x as i32 - max_x).abs()) as u32;
-                let src_y = (max_y - (y as i32 - max_y).abs()) as u32;
-                *input.get_pixel(src_x, src_y)
-            });
+            let src_x = (max_x - (x as i32 - max_x).abs()) as u32;
+            let src_y = (max_y - (y as i32 - max_y).abs()) as u32;
+            *input.get_pixel(src_x, src_y)
+        });
 
-            _store = Some(img);
-            ((tile_width, tile_height), _store.as_ref().unwrap())
-        };
+        _store = Some(img);
+        ((tile_width, tile_height), _store.as_ref().unwrap())
+    };
 
     let tile_size_total = tile_size_wh.0 * tile_size_wh.1;
     let lut_scale = (T_MAX as f32 - 1.0) / tile_size_total as f32;
@@ -197,12 +193,12 @@ where
     };
 
     // TODO is there a parallel for solution in rust?
-    let mut luts: Vec<[u32; T_MAX]> = vec![[0; T_MAX]; (tiles_x * tiles_y) as usize];
+    let mut luts: Vec<[u32; T_MAX]> = vec![[0; T_MAX]; tiles_x * tiles_y];
     for tile_x in 0..tiles_x {
         for tile_y in 0..tiles_y {
             calc_lut_body::<T, T_MAX>(
                 &mut luts[tile_y * tiles_x + tile_x],
-                &src_for_lut,
+                src_for_lut,
                 tile_size_wh,
                 clip_limit,
                 lut_scale,
@@ -219,7 +215,7 @@ where
         for tile_y in 0..=tiles_y {
             interpolate::<T, U, T_MAX, U_MAX>(
                 &mut dst,
-                &src_for_lut,
+                src_for_lut,
                 &luts,
                 tile_size_wh,
                 (tiles_x, tiles_y),
@@ -289,13 +285,14 @@ mod tests {
     }
 
     #[test]
-    fn output_values_in_range_u16_to_u8() {
+    fn u16_to_u8_produces_valid_output() {
         let img: ImageBuffer<Luma<u16>, Vec<u16>> =
             ImageBuffer::from_fn(128, 128, |x, y| Luma([((x * y) % 65536) as u16]));
         let out = clahe_u16_to_u8(4, 4, 3.0, &img);
-        for p in out.pixels() {
-            assert!(p.0[0] <= 255);
-        }
+        assert_eq!(out.width(), 128);
+        assert_eq!(out.height(), 128);
+        let max_val = out.pixels().map(|p| p.0[0]).max().unwrap();
+        assert!(max_val > 0, "output should not be all zeros");
     }
 
     #[test]

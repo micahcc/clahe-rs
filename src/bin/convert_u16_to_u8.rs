@@ -7,7 +7,7 @@ fn main() {
     } else {
         panic!(
             "Usage: {} <input> <output>",
-            std::env::args().nth(0).unwrap()
+            std::env::args().next().unwrap()
         );
     };
 
