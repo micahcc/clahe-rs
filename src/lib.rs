@@ -3,12 +3,13 @@ use image::GrayImage;
 use image::ImageBuffer;
 use image::Luma;
 
-fn calc_lut_body<T, const HIST_SIZE: usize>(
-    lut: &mut [u32; HIST_SIZE],
+const HIST_BINS: usize = 256;
+
+fn calc_lut_body<T, const LUT_SIZE: usize>(
+    lut: &mut [u32; LUT_SIZE],
     src: &ImageBuffer<Luma<T>, Vec<T>>,
     tile_size_wh: (usize, usize),
-    clip_limit: i32,
-    lut_scale: f32,
+    clip_limit: u32,
     tile_x: usize,
     tile_y: usize,
 ) where
@@ -21,45 +22,84 @@ fn calc_lut_body<T, const HIST_SIZE: usize>(
         tile_size_wh.1 as u32,
     );
 
-    let mut tile_hist: [u32; HIST_SIZE] = [0; HIST_SIZE];
+    let mut val_min = LUT_SIZE - 1;
+    let mut val_max = 0usize;
     for (_x, _y, v) in tile.pixels() {
-        tile_hist[v[0].to_usize().expect("failed to convert T to usize")] += 1;
+        let val = v[0].to_usize().expect("failed to convert T to usize");
+        val_min = val_min.min(val);
+        val_max = val_max.max(val);
     }
 
-    // clip histogram
-    if clip_limit > 0 {
-        let clip_limit = clip_limit as u32;
+    if val_min == val_max {
+        for entry in lut.iter_mut() {
+            *entry = val_min as u32;
+        }
+        return;
+    }
 
-        let mut clipped: usize = 0;
-        for bin in tile_hist.iter_mut() {
+    let range = val_max - val_min;
+    let bin_scale = (HIST_BINS - 1) as f32 / range as f32;
+
+    let mut hist: [u32; HIST_BINS] = [0; HIST_BINS];
+    for (_x, _y, v) in tile.pixels() {
+        let val = v[0].to_usize().unwrap();
+        let bin = ((val - val_min) as f32 * bin_scale) as usize;
+        hist[bin.min(HIST_BINS - 1)] += 1;
+    }
+
+    if clip_limit > 0 {
+        let mut clipped: u32 = 0;
+        for bin in hist.iter_mut() {
             if *bin > clip_limit {
-                clipped += (*bin - clip_limit) as usize;
+                clipped += *bin - clip_limit;
                 *bin = clip_limit;
             }
         }
 
-        let redist_batch = clipped / HIST_SIZE;
-        let mut residual = clipped - redist_batch * HIST_SIZE;
-        for bin in tile_hist.iter_mut() {
-            *bin += redist_batch as u32;
+        let redist_batch = clipped / HIST_BINS as u32;
+        let mut residual = (clipped - redist_batch * HIST_BINS as u32) as usize;
+        for bin in hist.iter_mut() {
+            *bin += redist_batch;
         }
 
         if residual != 0 {
-            let residual_step = HIST_SIZE.checked_div(residual).unwrap_or(1).max(1);
+            let residual_step = HIST_BINS.checked_div(residual).unwrap_or(1).max(1);
             let mut i = 0;
-            while i < HIST_SIZE && residual > 0 {
-                tile_hist[i] += 1;
+            while i < HIST_BINS && residual > 0 {
+                hist[i] += 1;
                 i += residual_step;
                 residual -= 1;
             }
         }
     }
 
-    // calc Lut
-    let mut sum = 0;
-    for i in 0..HIST_SIZE {
-        sum += tile_hist[i];
-        lut[i] = (sum as f32 * lut_scale).clamp(0.0, HIST_SIZE as f32 - 1.0) as u32;
+    let tile_pixels = (tile_size_wh.0 * tile_size_wh.1) as f32;
+    let lut_scale = (LUT_SIZE as f32 - 1.0) / tile_pixels;
+
+    let mut cdf: [u32; HIST_BINS] = [0; HIST_BINS];
+    let mut sum = 0u32;
+    for i in 0..HIST_BINS {
+        sum += hist[i];
+        cdf[i] = (sum as f32 * lut_scale).clamp(0.0, (LUT_SIZE - 1) as f32) as u32;
+    }
+
+    for (i, entry) in lut.iter_mut().enumerate() {
+        if i < val_min {
+            *entry = cdf[0];
+        } else if i >= val_max {
+            *entry = cdf[HIST_BINS - 1];
+        } else {
+            let pos = (i - val_min) as f32 * bin_scale;
+            let bin = pos as usize;
+            let frac = pos - bin as f32;
+            let lo = cdf[bin] as f32;
+            let hi = if bin + 1 < HIST_BINS {
+                cdf[bin + 1] as f32
+            } else {
+                lo
+            };
+            *entry = (lo + frac * (hi - lo)).clamp(0.0, (LUT_SIZE - 1) as f32) as u32;
+        }
     }
 }
 
@@ -191,15 +231,14 @@ where
     };
 
     let tile_size_total = tile_size_wh.0 * tile_size_wh.1;
-    let lut_scale = (T_MAX as f32 - 1.0) / tile_size_total as f32;
 
-    let clip_limit = if clip_limit > 0.0 {
-        (clip_limit * tile_size_total as f32 / T_MAX as f32).max(1.0) as i32
+    let clip_limit: u32 = if clip_limit > 0.0 {
+        let avg_bin_count = tile_size_total as f32 / HIST_BINS as f32;
+        (clip_limit * avg_bin_count).max(1.0) as u32
     } else {
         0
     };
 
-    // TODO is there a parallel for solution in rust?
     let mut luts: Vec<[u32; T_MAX]> = vec![[0; T_MAX]; tiles_x * tiles_y];
     for tile_x in 0..tiles_x {
         for tile_y in 0..tiles_y {
@@ -208,7 +247,6 @@ where
                 src_for_lut,
                 tile_size_wh,
                 clip_limit,
-                lut_scale,
                 tile_x,
                 tile_y,
             );
@@ -343,5 +381,20 @@ mod tests {
         let out_max = out.pixels().map(|p| p.0[0]).max().unwrap();
         assert!(out_max > 200, "expected high max, got {}", out_max);
         assert!(out_min < 55, "expected low min, got {}", out_min);
+    }
+
+    #[test]
+    fn u16_narrow_band_uses_full_output_range() {
+        let img: ImageBuffer<Luma<u16>, Vec<u16>> =
+            ImageBuffer::from_fn(128, 128, |x, _y| Luma([19000 + (x * 8) as u16]));
+        let out = clahe_u16_to_u8(4, 4, 40.0, &img);
+        let out_min = out.pixels().map(|p| p.0[0]).min().unwrap();
+        let out_max = out.pixels().map(|p| p.0[0]).max().unwrap();
+        assert!(
+            out_max - out_min > 200,
+            "narrow-band u16 input should expand to near-full u8 range, got {}..{}",
+            out_min,
+            out_max
+        );
     }
 }
