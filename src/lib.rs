@@ -132,6 +132,19 @@ fn interpolate<T, U, const T_MAX: usize, const U_MAX: usize>(
     }
 }
 
+fn reflect(coord: usize, size: usize) -> usize {
+    if coord < size {
+        return coord;
+    }
+    let period = 2 * size;
+    let wrapped = coord % period;
+    if wrapped < size {
+        wrapped
+    } else {
+        period - 1 - wrapped
+    }
+}
+
 pub fn clahe_generic<T, U, const T_MAX: usize, const U_MAX: usize>(
     tiles_x: usize,
     tiles_y: usize,
@@ -165,18 +178,12 @@ where
         let tile_height = (input.height() as usize).div_ceil(tiles_y);
         let new_width = tile_width * tiles_x;
         let new_height = tile_height * tiles_y;
-        let max_x = input.width() as i32 - 1;
-        let max_y = input.height() as i32 - 1;
+        let w = input.width() as usize;
+        let h = input.height() as usize;
         let img = ImageBuffer::from_fn(new_width as u32, new_height as u32, |x, y| {
-            // mirror boundary
-            // max_x - abs(0 - max_x) => 0
-            // max_x - abs(width - 1 - max_x) => width - 1
-            // max_x - abs(width - max_x) => width - 2
-            // max_x - abs(width + 1 - max_x) => width - 3
-
-            let src_x = (max_x - (x as i32 - max_x).abs()) as u32;
-            let src_y = (max_y - (y as i32 - max_y).abs()) as u32;
-            *input.get_pixel(src_x, src_y)
+            let src_x = reflect(x as usize, w);
+            let src_y = reflect(y as usize, h);
+            *input.get_pixel(src_x as u32, src_y as u32)
         });
 
         _store = Some(img);
@@ -310,6 +317,22 @@ mod tests {
         let out = clahe_u16_to_u8(4, 4, 2.0, &img);
         assert_eq!(out.width(), 64);
         assert_eq!(out.height(), 64);
+    }
+
+    #[test]
+    fn more_tiles_than_pixels() {
+        let img = ImageBuffer::from_fn(4, 4, |x, y| Luma([((x + y) * 32) as u8]));
+        let out = clahe_u8_to_u8(8, 8, 2.0, &img);
+        assert_eq!(out.width(), 4);
+        assert_eq!(out.height(), 4);
+    }
+
+    #[test]
+    fn tiny_image_large_tiles() {
+        let img = ImageBuffer::from_fn(2, 2, |x, y| Luma([((x + y) * 100) as u8]));
+        let out = clahe_u8_to_u8(16, 16, 2.0, &img);
+        assert_eq!(out.width(), 2);
+        assert_eq!(out.height(), 2);
     }
 
     #[test]
