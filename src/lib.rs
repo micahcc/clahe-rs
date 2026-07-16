@@ -142,7 +142,7 @@ pub fn clahe_generic<T, U, const T_MAX: usize, const U_MAX: usize>(
     tiles_y: usize,
     clip_limit: f32,
     input: &ImageBuffer<Luma<T>, Vec<T>>,
-) -> Result<ImageBuffer<Luma<U>, Vec<U>>, Box<dyn std::error::Error>>
+) -> ImageBuffer<Luma<U>, Vec<U>>
 where
     T: image::Primitive,
     U: image::Primitive
@@ -150,6 +150,8 @@ where
         + num_traits::cast::FromPrimitive
         + std::fmt::Display,
 {
+    assert!(tiles_x > 0, "tiles_x must be > 0");
+    assert!(tiles_y > 0, "tiles_y must be > 0");
     let mut dst = ImageBuffer::<Luma<U>, Vec<U>>::new(input.width(), input.height());
     let mut _store = None;
 
@@ -227,7 +229,7 @@ where
         }
     }
 
-    Ok(dst)
+    dst
 }
 
 pub fn clahe_u8_to_u8(
@@ -235,7 +237,7 @@ pub fn clahe_u8_to_u8(
     tiles_y: usize,
     clip_limit: f32,
     input: &GrayImage,
-) -> Result<GrayImage, Box<dyn std::error::Error>> {
+) -> GrayImage {
     clahe_generic::<u8, u8, 256, 256>(tiles_x, tiles_y, clip_limit, input)
 }
 
@@ -244,6 +246,82 @@ pub fn clahe_u16_to_u8(
     tiles_y: usize,
     clip_limit: f32,
     input: &ImageBuffer<Luma<u16>, Vec<u16>>,
-) -> Result<GrayImage, Box<dyn std::error::Error>> {
+) -> GrayImage {
     clahe_generic::<u16, u8, 65536, 256>(tiles_x, tiles_y, clip_limit, input)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn uniform_image_produces_uniform_output() {
+        let img = ImageBuffer::from_pixel(64, 64, Luma([128u8]));
+        let out = clahe_u8_to_u8(8, 8, 2.0, &img);
+        let first = out.pixels().next().unwrap().0[0];
+        for p in out.pixels() {
+            assert_eq!(p.0[0], first, "all pixels should be the same value");
+        }
+    }
+
+    #[test]
+    fn output_dimensions_match_input() {
+        let img = ImageBuffer::from_fn(100, 80, |x, _y| Luma([(x % 256) as u8]));
+        let out = clahe_u8_to_u8(8, 8, 2.0, &img);
+        assert_eq!(out.width(), 100);
+        assert_eq!(out.height(), 80);
+    }
+
+    #[test]
+    fn non_divisible_dimensions() {
+        let img = ImageBuffer::from_fn(97, 53, |x, y| Luma([((x + y) % 256) as u8]));
+        let out = clahe_u8_to_u8(8, 8, 2.0, &img);
+        assert_eq!(out.width(), 97);
+        assert_eq!(out.height(), 53);
+    }
+
+    #[test]
+    fn single_tile() {
+        let img = ImageBuffer::from_fn(64, 64, |x, _y| Luma([(x * 4) as u8]));
+        let out = clahe_u8_to_u8(1, 1, 2.0, &img);
+        assert_eq!(out.width(), 64);
+        assert_eq!(out.height(), 64);
+    }
+
+    #[test]
+    fn output_values_in_range_u16_to_u8() {
+        let img: ImageBuffer<Luma<u16>, Vec<u16>> =
+            ImageBuffer::from_fn(128, 128, |x, y| Luma([((x * y) % 65536) as u16]));
+        let out = clahe_u16_to_u8(4, 4, 3.0, &img);
+        for p in out.pixels() {
+            assert!(p.0[0] <= 255);
+        }
+    }
+
+    #[test]
+    fn zero_clip_limit_no_clipping() {
+        let img = ImageBuffer::from_fn(64, 64, |x, y| Luma([((x + y) % 256) as u8]));
+        let out = clahe_u8_to_u8(8, 8, 0.0, &img);
+        assert_eq!(out.width(), 64);
+        assert_eq!(out.height(), 64);
+    }
+
+    #[test]
+    fn u16_to_u8_output_dimensions() {
+        let img: ImageBuffer<Luma<u16>, Vec<u16>> =
+            ImageBuffer::from_fn(64, 64, |x, _y| Luma([(x * 256) as u16]));
+        let out = clahe_u16_to_u8(4, 4, 2.0, &img);
+        assert_eq!(out.width(), 64);
+        assert_eq!(out.height(), 64);
+    }
+
+    #[test]
+    fn gradient_uses_full_range() {
+        let img = ImageBuffer::from_fn(128, 128, |x, _y| Luma([((x * 2) % 256) as u8]));
+        let out = clahe_u8_to_u8(4, 4, 40.0, &img);
+        let out_min = out.pixels().map(|p| p.0[0]).min().unwrap();
+        let out_max = out.pixels().map(|p| p.0[0]).max().unwrap();
+        assert!(out_max > 200, "expected high max, got {}", out_max);
+        assert!(out_min < 55, "expected low min, got {}", out_min);
+    }
 }
